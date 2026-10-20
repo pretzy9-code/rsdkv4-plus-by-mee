@@ -21,22 +21,6 @@ TrackInfo musicTracks[TRACK_COUNT];
 SFXInfo sfxList[SFX_COUNT];
 char sfxNames[SFX_COUNT][0x40];
 
-// Audio Muffle stuff
-int mUnderwaterEffect = 0;
-float mVolumeMultiplier = 1.0f;
-static inline const constexpr size_t MAX_NUM_CHANNELS = 2;
-static inline const constexpr size_t OUTPUT_BUFFER_SIZE = 1024;
-static inline const constexpr size_t ACCUMULATION_BUFFER_SIZE = 128;
-
-struct MusicMuffleChannelData {
-    float mAccumulator;
-    size_t mIndexInHistory;
-    float mHistoryBuffer[ACCUMULATION_BUFFER_SIZE];
-    int mOutputBuffer[OUTPUT_BUFFER_SIZE] = { 0 };
-};
-
-static MusicMuffleChannelData mChannelData[MAX_NUM_CHANNELS];
-
 int currentStreamIndex = 0;
 StreamFile streamFile[STREAMFILE_COUNT];
 StreamInfo streamInfo[STREAMFILE_COUNT];
@@ -54,6 +38,21 @@ SDL_AudioDeviceID audioDevice;
 SDL_AudioStream *ogv_stream;
 #endif
 SDL_AudioSpec audioDeviceFormat;
+
+// Audio Muffle stuff
+int mUnderwaterEffect = 0;
+float mVolumeMultiplier = 1.0f;
+#define ACCUMULATION_BUFFER_SIZE (128)
+#define OUTPUT_BUFFER_SIZE      (1024)
+
+struct MusicMuffleChannelData {
+    float mAccumulator;
+    int mIndexInHistory;
+    float mHistoryBuffer[ACCUMULATION_BUFFER_SIZE];
+    int mOutputBuffer[OUTPUT_BUFFER_SIZE] = { 0 };
+};
+
+static MusicMuffleChannelData mChannelData[CHANNEL_COUNT];
 
 #define AUDIO_FREQUENCY (44100)
 #define AUDIO_FORMAT    (AUDIO_S16SYS) /**< Signed 16-bit samples */
@@ -240,7 +239,7 @@ void ProcessMusicStream(Sint32 *stream, size_t bytes_wanted)
     switch (musicStatus) {
         case MUSIC_READY:
         case MUSIC_PLAYING: {
-            // Properly sets the track position to a specific point (in samples)
+            // Properly sets the track position to a specific point
             if (musicSeekPos >= 0) {
                 ov_pcm_seek(&streamInfoPtr->vorbisFile, musicSeekPos);
 #if RETRO_USING_SDL2
@@ -491,18 +490,24 @@ void ProcessAudioPlayback(void *userdata, Uint8 *stream, int len)
                 Sint16 buffer[MIX_BUFFER_SAMPLES];
 
                 size_t samples_done = 0;
+                float srcPos = sfx->samplePos;
+                Sint16 *src = sfx->samplePtr;
+                size_t remaining = sfx->sampleLength;
+
                 while (samples_done != samples_to_do) {
-                    size_t sampleLen = (sfx->sampleLength < samples_to_do - samples_done) ? sfx->sampleLength : samples_to_do - samples_done;
-                    memcpy(&buffer[samples_done], sfx->samplePtr, sampleLen * sizeof(Sint16));
+                    // Pitch (100 is normal, higher increases and lower decreases)
+                    const float pitch = (float)sfx->pitch / 100.0f;
+                    const size_t srcIndex = (size_t)srcPos;
 
-                    samples_done += sampleLen;
-                    sfx->samplePtr += sampleLen;
-                    sfx->sampleLength -= sampleLen;
-
-                    if (sfx->sampleLength == 0) {
+                    if (remaining == 0 || srcIndex >= remaining) {
                         if (sfx->loopSFX) {
-                            sfx->samplePtr    = sfxList[sfx->sfxID].buffer;
-                            sfx->sampleLength = sfxList[sfx->sfxID].length;
+                            SFXInfo *loopSfx = &sfxList[sfx->sfxID];
+                            if (loopSfx->buffer && loopSfx->length > 0) {
+                                src = loopSfx->buffer;
+                                remaining = loopSfx->length;
+                                srcPos = 0.0f;
+                                continue;
+                            }
                         }
                         else {
                             MEM_ZEROP(sfx);
@@ -510,11 +515,31 @@ void ProcessAudioPlayback(void *userdata, Uint8 *stream, int len)
                             break;
                         }
                     }
+
+                    const Sint16 a = src[srcIndex];
+                    const Sint16 b = (srcIndex + 1 < remaining) ? src[srcIndex + 1] : a;
+                    const float frac = srcPos - (float)srcIndex;
+
+                    buffer[samples_done++] = (Sint16)(a + (b - a) * frac);
+
+                    srcPos += pitch;
+                    if (srcPos >= (float)remaining) {
+                        size_t consumed = (size_t)srcPos;
+                        if (consumed > remaining)
+                            consumed = remaining;
+                        src += consumed;
+                        remaining -= consumed;
+                        srcPos -= (float)consumed;
+                    }
                 }
 
+                sfx->samplePtr = src;
+                sfx->sampleLength = remaining;
+                sfx->samplePos = srcPos;
+
 #if RETRO_USING_SDL1 || RETRO_USING_SDL2
-            int volume = sfx->isVoice ? voiceVolume : sfxVolume;
-            ProcessAudioMixing(mix_buffer, buffer, (int)samples_done, volume, sfx->pan);
+                int volume = sfx->isVoice ? voiceVolume : sfxVolume;
+                ProcessAudioMixing(mix_buffer, buffer, (int)samples_done, volume, sfx->pan);
 #endif
             }
         }
@@ -973,6 +998,7 @@ void PlaySfx(int sfx, bool loop)
     sfxInfo->sfxID        = sfx;
     sfxInfo->samplePtr    = sfxList[sfx].buffer;
     sfxInfo->sampleLength = sfxList[sfx].length;
+    sfxInfo->samplePos    = 0.0f;
     sfxInfo->loopSFX      = loop;
     sfxInfo->pan          = 0;
     sfxInfo->isVoice      = false;
@@ -1012,6 +1038,7 @@ void PlayVoice(int sfx, bool loop)
     sfxInfo->sfxID        = sfx;
     sfxInfo->samplePtr    = sfxList[sfx].buffer;
     sfxInfo->sampleLength = sfxList[sfx].length;
+    sfxInfo->samplePos    = 0.0f;
     sfxInfo->loopSFX      = loop;
     sfxInfo->pan          = 0;
     sfxInfo->isVoice      = true;
@@ -1242,7 +1269,7 @@ void SetMusicMuffle(int effect, float volumeMultiplier)
     }
     else if (mUnderwaterEffect <= 0) {
         // Effect gets switched on, start with empty history and accumulator
-        for (size_t k = 0; k < CHANNEL_COUNT; ++k) 
+        for (size_t k = 0; k < CHANNEL_COUNT; ++k)
         {
             mChannelData[k].mAccumulator = 0;
             mChannelData[k].mIndexInHistory = 0;

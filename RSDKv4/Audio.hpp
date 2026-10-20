@@ -4,7 +4,7 @@
 #define TRACK_COUNT (0x10)
 
 #if RETRO_VANILLA_LIKE
-    #define SFX_COUNT   (0x100)
+    #define SFX_COUNT (0x100)
     
     #if !RETRO_USE_ORIGINAL_CODE
         #define CHANNEL_COUNT (0x10) // 4 in the original, 16 for convenience
@@ -12,7 +12,7 @@
         #define CHANNEL_COUNT (0x6)
     #endif
 #else
-    #define SFX_COUNT   (0x400)
+    #define SFX_COUNT (0x400)
 
     #if !RETRO_USE_ORIGINAL_CODE
         #define CHANNEL_COUNT (0x40) // 4 in the original, 16 for convenience, 64 for awesomeness
@@ -75,12 +75,13 @@ struct SFXInfo {
 struct ChannelInfo {
     size_t sampleLength;
     Sint16 *samplePtr;
+    float samplePos = 0.0f;
     int sfxID;
     byte loopSFX;
     sbyte pan;
+    int pitch;
     bool isVoice;
     bool paused;
-    int pitch;
 };
 
 struct StreamFile {

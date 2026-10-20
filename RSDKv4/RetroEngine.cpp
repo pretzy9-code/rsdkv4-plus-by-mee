@@ -9,7 +9,6 @@ bool engineDebugMode = false;
 #include <unistd.h>
 #endif
 
-bool enginestruggle = false;
 float devMenuHoldTimer = 0.0f;
 
 RetroEngine Engine = RetroEngine();
@@ -66,9 +65,24 @@ bool ProcessEvents()
 {
 #if !RETRO_USE_ORIGINAL_CODE
     // Dev menu for controllers
-    if (Engine.devMenu) {
-        SDL_GameController *controller = SDL_GameControllerOpen(0);
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START) && SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK)) 
+    if (Engine.devMenu)
+    {
+        bool devMenuShortcutHeld = false;
+#if RETRO_USING_SDL2
+        if (!controllers.empty())
+        {
+            SDL_GameController *controller = controllers[0].devicePtr;
+            if (controller && SDL_GameControllerGetAttached(controller))
+            {
+                SDL_GameControllerUpdate();
+                if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)
+                    && SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_BACK)) {
+                    devMenuShortcutHeld = true;
+                }
+            }
+        }
+#endif
+        if (devMenuShortcutHeld)
         {
             devMenuHoldTimer += Engine.deltaTime;
             if (devMenuHoldTimer >= 0.8f)
@@ -83,7 +97,11 @@ bool ProcessEvents()
                 if (Engine.gameDeviceType == RETRO_MOBILE)
                     CREATE_ENTITY(VirtualDPad);
                 Engine.gameMode = ENGINE_INITDEVMENU;
+                devMenuHoldTimer = 0.0f;
             }
+        }
+        else
+        {
             devMenuHoldTimer = 0.0f;
         }
     }
@@ -733,9 +751,13 @@ void RetroEngine::Run()
 {
     Engine.deltaTime = 0.0f;
 
-    unsigned long long targetFreq = SDL_GetPerformanceFrequency() / Engine.refreshRate;
+	unsigned long long PerformFreq = SDL_GetPerformanceFrequency();
+    unsigned long long targetFreq = PerformFreq / Engine.refreshRate;
     unsigned long long curTicks   = 0;
     unsigned long long prevTicks  = 0;
+	int unit = 0;
+	int unitCount = 0;
+	int textSheet = 0;
     int lastFPS = Engine.refreshRate;
 
     while (running) {
@@ -744,11 +766,8 @@ void RetroEngine::Run()
 		//it still syncs to the screen
         //if (!vsync) {
             curTicks = SDL_GetPerformanceCounter();
-            if (curTicks < prevTicks + targetFreq) {
-				//the engine got a chance to wait, no need to square
-				enginestruggle = false;
+            if (curTicks < prevTicks + targetFreq)
                 continue;
-			}
             prevTicks = curTicks;
         //}
 
@@ -791,10 +810,29 @@ void RetroEngine::Run()
 #endif
             }
 			
-			if (Engine.devMenu && enginestruggle) {
-			    	DrawRectangle(SCREEN_XSIZE - 5, SCREEN_YSIZE - 5, 3, 3, 0xFF, 0x00, 0x00, 0xFF);
+			// Display frame process time in milliseconds
+			if (Engine.frameProcessTime) {
+				curTicks  = SDL_GetPerformanceCounter() - prevTicks;
+				curTicks *= 1000000; // turn seconds into microseconds
+				curTicks /= PerformFreq;
+				
+				textSheet = AddSystemGraphicsFile("Data/Game/SystemText.gif");
+				SetPaletteEntry(-1, 0xFF, 0xFF, 0xFF, 0xFF);
+				unitCount = 0;
+				
+				while (curTicks >= 1 || unitCount < 5) {
+					unit = curTicks % 10;
+					DrawRectangle(SCREEN_XSIZE - (10 + (unitCount*8)), SCREEN_YSIZE - 10, 8, 8, 0x00, 0x00, 0x00, 0xFF);
+					DrawSprite(SCREEN_XSIZE - (10 + (unitCount*8)), SCREEN_YSIZE - 10, 8, 8, unit*8, 152, textSheet);
+					curTicks /= 10;
+					unitCount++;
+					if (unitCount == 3) { //decimal point after three digits, turning microseconds into milliseconds
+						DrawRectangle(SCREEN_XSIZE - (10 + (unitCount*8)), SCREEN_YSIZE - 10, 8, 8, 0x00, 0x00, 0x00, 0xFF);
+						DrawSprite(SCREEN_XSIZE - (10 + (unitCount*8)), SCREEN_YSIZE - 9, 8, 8, 112, 144, textSheet);
+						unitCount++;
+					}
+				}
 			}
-			enginestruggle = true;
 
 #if !RETRO_USE_ORIGINAL_CODE
             if (!masterPaused || frameStep) {
